@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+leaderboard.csv
+leaderboard.html
+.DS_Store
