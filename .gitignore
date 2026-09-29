@@ -1,3 +1,10 @@
+# Editors and OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# C++ (orderbook/)
 build/
 cmake-build-*/
 .cache/
@@ -6,10 +13,14 @@ cmake-build-*/
 *.so
 *.dylib
 compile_commands.json
-.vscode/
-.idea/
-.DS_Store
-Thumbs.db
 benchmarks/results/
+
+# Python (backtester/ has its own .gitignore for project-specific outputs)
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Personal notes, never committed
 context/
 personal_docs/
