@@ -130,6 +130,35 @@ add_order(incoming):
 
 ---
 
+## Benchmark Results — Linux Server (Phase 1 code, re-run)
+
+**Hardware:** Intel Xeon @ 2.10 GHz (4 vCPU cloud VM, 8 MiB L2, shared L3)  
+**Compiler:** GCC 13.3.0  
+**Build:** `-O3 -DNDEBUG` (CMake Release)  
+**Correctness gate:** 37/37 tests pass in Release and in Debug with ASan + UBSan; zero warnings under `-Wall -Wextra -Wpedantic -Wshadow -Wconversion`.
+
+### Throughput (`me_bench`, 10 repetitions)
+
+| Statistic | CPU time / op | Throughput |
+|---|---|---|
+| median | 116 ns | 8.61 M orders/s |
+| mean   | 117 ns | 8.52 M orders/s |
+| CV     | 3.7%   | — |
+
+Run with `--benchmark_min_time=50000x` so every timed order has a unique ID. The default run reuses the 100k pre-generated orders after the first pass, and duplicate IDs take the early-return path in `add_order`. On this machine both runs give the same result (default run: 116 ns, 8.63 M/s, CV 0.5%).
+
+### Latency Distribution (`me_latency`, 5 runs)
+
+Each run executes 1M generator ops; the 713,981 `add_order` calls are timed individually (cancels are executed but not timed). The table shows the median of the 5 runs, with the range in parentheses. Measurements include `steady_clock::now()` overhead.
+
+| Percentile | Latency |
+|---|---|
+| p50   | 108 ns (107–120) |
+| p99   | 351 ns (344–432) |
+| p99.9 | 562 ns (535–1,060) |
+
+---
+
 ## Key Design Decisions
 
 **Integer prices, not floats.**
