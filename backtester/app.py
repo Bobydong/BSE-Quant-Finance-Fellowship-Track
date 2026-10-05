@@ -461,9 +461,17 @@ with tab_trades:
             f"that close, and starts earning from the next {bar_unit}. "
             f"\"Trades\" at the top counts every position change instead, so a "
             f"flip from long to short is one change but closes one trade and "
-            f"opens another.")
+            f"opens another. Likewise \"Win rate\" at the top counts winning "
+            f"{bar_unit}s, while \"Winning trades\" here counts whole trades.")
 
-        st.dataframe(trades.style.format({
+        # Daily data has no meaningful time of day; show dates only.
+        shown = trades.copy()
+        times = pd.concat([shown["entry_time"], shown["exit_time"]]).dropna()
+        if len(times) and (times == times.dt.normalize()).all():
+            for col in ("entry_time", "exit_time"):
+                shown[col] = shown[col].dt.strftime("%Y-%m-%d")
+        shown.index = shown.index + 1           # trade 1, 2, 3... not 0, 1, 2
+        st.dataframe(shown.style.format({
             "entry_price": "{:.2f}", "exit_price": "{:.2f}", "size": "{:.2f}",
             "return": "{:+.2%}", "bars_held": "{:,}"}, na_rep="open"),
             use_container_width=True, height=360)
