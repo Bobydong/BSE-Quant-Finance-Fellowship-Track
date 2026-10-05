@@ -12,6 +12,11 @@ student backtests usually go wrong:
 2. LOOKAHEAD BIAS.  The engine checks whether your positions correlate with
    the SAME day's return more than with yesterday's, which is the fingerprint
    of trading on information you would not have had.
+
+Both kinds of strategy end up here the same way: whether a fellow returned a
+whole column of positions at once or opened and closed trades bar by bar
+(see EventStrategy), the engine only ever sees the resulting positions. So
+every rule above applies to both.
 """
 
 from __future__ import annotations
@@ -35,6 +40,7 @@ class BacktestResult:
     warnings: list[str] = field(default_factory=list)
     fee_bps: float = 0.0
     periods_per_year: int = 365  # annualization factor actually used
+    trades: pd.DataFrame = field(default_factory=pd.DataFrame)  # one row per round trip
 
     @property
     def equity(self) -> pd.Series:
@@ -110,10 +116,23 @@ def run(strategy: Strategy, data: pd.DataFrame, fee_bps: float = 0.0,
     Returns:
         BacktestResult
     """
+    positions = strategy.generate_positions(data)
+    return run_positions(positions, data, fee_bps=fee_bps,
+                         periods_per_year=periods_per_year,
+                         strategy_name=strategy.name)
+
+
+def run_positions(positions, data: pd.DataFrame, fee_bps: float = 0.0,
+                  periods_per_year: int | None = None,
+                  strategy_name: str = "Positions") -> BacktestResult:
+    """Backtest a finished list of positions instead of a strategy.
+
+    run() asks the strategy for its positions and then calls this. Splitting
+    the two lets cost_sweep() reuse one set of positions across every fee
+    level, which matters for bar-by-bar strategies that are slower to run.
+    """
     if periods_per_year is None:
         periods_per_year = infer_periods_per_year(data)
-
-    positions = strategy.generate_positions(data)
 
     if not isinstance(positions, pd.Series):
         positions = pd.Series(positions, index=data.index)
@@ -200,28 +219,117 @@ def run(strategy: Strategy, data: pd.DataFrame, fee_bps: float = 0.0,
     yearly = pd.DataFrame(rows).set_index("year")
 
     return BacktestResult(
-        strategy_name=strategy.name,
+        strategy_name=strategy_name,
         data=out,
         metrics=metrics,
         yearly=yearly,
         warnings=warnings,
         fee_bps=fee_bps,
         periods_per_year=periods_per_year,
+        trades=trade_log(out, fee_bps),
     )
+
+
+def trade_log(out: pd.DataFrame, fee_bps: float = 0.0) -> pd.DataFrame:
+    """List every round trip: when a position was opened, and when it closed.
+
+    A trade starts when the position goes from flat (or the opposite side) to
+    long or short, and ends when it goes back to flat or flips. Changing the
+    size without changing side (0.5 -> 1.0) stays part of the same trade.
+
+    Timing matches the engine: a decision made at the close of bar t is filled
+    at that close, and the position earns bar t+1's return onwards. So
+    "entry_time" is the bar whose close you traded at, and the first bar
+    that actually earned money is the one after it.
+
+    "return" compounds the bars the trade was held and subtracts the entry
+    and exit fees. It is a per-trade summary; the equity curve remains the
+    exact record of what the strategy earned.
+    """
+    positions = out["position"].to_numpy()
+    closes = out["close"].to_numpy()
+    market = out["market_return"].to_numpy()
+    gross = out["gross_return"].to_numpy()
+    index = out.index
+    fee = fee_bps / 10_000.0
+
+    rows = []
+    start = None                       # bar index of the first bar held
+    for i in range(len(positions) + 1):
+        side_now = np.sign(positions[i]) if i < len(positions) else 0.0
+        side_before = np.sign(positions[i - 1]) if i > 0 else 0.0
+        if side_now == side_before:
+            continue
+
+        # The trade that was running (if any) ends at the previous bar.
+        if start is not None:
+            last = i - 1
+            still_open = i == len(positions)
+            rows.append(_trade_row(index, positions, closes, market, gross,
+                                   fee, start, last, still_open))
+            start = None
+
+        if side_now != 0:
+            start = i
+
+    columns = ["side", "entry_time", "entry_price", "exit_time", "exit_price",
+               "bars_held", "size", "return", "status"]
+    return pd.DataFrame(rows, columns=columns)
+
+
+def _trade_row(index, positions, closes, market, gross, fee, start, last,
+               still_open):
+    """Summarize one trade that was held from bar `start` to bar `last`."""
+    entry_size = abs(float(positions[start]))
+    exit_size = abs(float(positions[last]))
+    # The fill price is the close BEFORE the first bar held. Recover it from
+    # that bar's return, which also works when the trade starts on bar 0.
+    entry_price = closes[start] / (1.0 + market[start])
+    if start > 0:
+        entry_time = index[start - 1]
+    elif len(index) > 1:
+        # Bar 0's previous close was dropped by load(); step back one bar.
+        entry_time = index[0] - (index[1] - index[0])
+    else:
+        entry_time = index[0]
+
+    held = gross[start:last + 1]
+    compounded = float(np.prod(1.0 + held) - 1.0)
+    entry_fee = fee * entry_size
+    exit_fee = 0.0 if still_open else fee * exit_size
+
+    return {
+        "side": "long" if positions[start] > 0 else "short",
+        "entry_time": entry_time,
+        "entry_price": float(entry_price),
+        "exit_time": pd.NaT if still_open else index[last],
+        "exit_price": float(closes[last]),
+        "bars_held": int(last - start + 1),
+        "size": entry_size,
+        "return": compounded - entry_fee - exit_fee,
+        "status": "open" if still_open else "closed",
+    }
 
 
 def cost_sweep(strategy: Strategy, data: pd.DataFrame,
                levels=(0, 1, 2, 5, 10, 20),
-               periods_per_year: int | None = None) -> pd.DataFrame:
+               periods_per_year: int | None = None,
+               positions: pd.Series | None = None) -> pd.DataFrame:
     """Re-run the strategy across several fee levels.
 
     The question this answers: at what cost does the edge disappear?
     A strategy that dies at 2bps is not tradeable.
+
+    The strategy itself runs once; only the fee changes between rows. Pass
+    `positions` if you already have them, to skip even that one run.
     """
+    if positions is None:
+        positions = strategy.generate_positions(data)
     rows = []
     for bps in levels:
-        m = run(strategy, data, fee_bps=bps,
-                periods_per_year=periods_per_year).metrics
+        m = run_positions(positions, data, fee_bps=bps,
+                          periods_per_year=periods_per_year,
+                          strategy_name=strategy.name).metrics
         rows.append({
             "fee_bps": bps,
             "sharpe": m["sharpe"],
