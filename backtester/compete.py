@@ -91,7 +91,7 @@ def main() -> None:
             flagged = any("LOOKAHEAD" in w or "WIPED OUT" in w for w in res.warnings)
             rows.append({
                 "author": author,
-                "strategy": cls.name,
+                "strategy": res.strategy_name,
                 "total_return": m["total_return"],
                 "sharpe": m["sharpe"],
                 "max_drawdown": m["max_drawdown"],
@@ -100,7 +100,7 @@ def main() -> None:
                 "flagged": "⚠️" if flagged else "",
             })
             flag = "  ⚠️ " + res.warnings[0][:60] if flagged else ""
-            print(f"  ✓ {author:<18} {cls.name:<28} "
+            print(f"  ✓ {author:<18} {res.strategy_name:<28} "
                   f"Sharpe {m['sharpe']:>6.2f}  return {m['total_return']:>8.1%}{flag}")
 
     if not rows:
