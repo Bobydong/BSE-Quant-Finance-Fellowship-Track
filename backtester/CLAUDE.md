@@ -8,7 +8,8 @@ and no finance background).
 
 It is used two ways:
 
-1. **During the track** — fellows write a strategy in one method, run
+1. **During the track** — fellows write a strategy in one method (usually
+   `on_bar()` on an `EventStrategy`), run
    `streamlit run app.py`, and get a full performance report in the browser.
 2. **At demo day** — the instructor runs every submission against a held-out
    dataset with `compete.py` and publishes a static leaderboard.
@@ -71,11 +72,18 @@ for this in the verification snippet below.
 365 = daily crypto, 252 = daily equities, 12 = monthly. It is a property of
 the **data's frequency**, not of how often the strategy trades.
 
-### 4. Every strategy signal ends in `.shift(1)`
+### 4. The position for bar *t* only uses data up to bar *t-1*
 
-The position for day *t* may only use data from *t-1* or earlier. Every
-example strategy demonstrates this, and `_check_lookahead()` in `engine.py`
-warns when positions correlate suspiciously with the same day's return.
+For column-at-a-time `Strategy` subclasses this means every signal ends in
+`.shift(1)`; every example in `examples.py` demonstrates it, and
+`_check_lookahead()` in `engine.py` warns when positions correlate
+suspiciously with the same day's return.
+
+For `EventStrategy` it is enforced by construction: `on_bar()` sees bars
+`0..t` and its decision is written to `positions[t + 1]`. That is exactly a
+`.shift(1)`, and `test_event_version_matches_vectorized_version_exactly`
+proves it by reproducing `ShortTermReversal` bit for bit. Do not change
+`_walk()` in a way that breaks that test.
 
 `LookaheadCheater` in `strategies/examples.py` is **deliberately broken** and
 must stay that way — fellows run it to see what cheating looks like.
@@ -89,21 +97,47 @@ turnover = positions.diff().abs().fillna(positions.abs())
 A position held from one day to the next costs nothing. Flipping +1 → -1
 trades two units of equity and pays two fees.
 
+### 6. Every dataset has the same columns
+
+`load()` always returns `open, high, low, close, volume, simple_return,
+log_return` (NaN where the source lacks a column), whatever the file looked
+like. A strategy developed on one dataset must not crash on the held-out
+one because a column is missing. For stocks, `Adj Close` wins over `Close`.
+
+### 7. Every EventStrategy run starts from a fresh copy
+
+`generate_positions()` deep-copies the strategy before walking the data, so
+state a fellow stores on `self` cannot leak between runs (the app runs a
+strategy for the Performance tab and reuses positions for the Costs tab;
+`compete.py` runs each once). `test_runs_do_not_leak_state` guards this.
+
 ## Layout
 
 ```
 bsequant/
-  strategy.py    Strategy ABC - the interface fellows implement
-  data.py        loading, train/test split, frequency inference
-  engine.py      backtest, metrics, lookahead detection, cost sweep
+  strategy.py    EventStrategy (on_bar, go_long/go_short/go_flat) and the
+                 column-at-a-time Strategy ABC it builds on
+  data.py        loading any common CSV, train/test split, frequency inference
+  engine.py      run / run_positions, metrics, trade log, lookahead
+                 detection, cost sweep
 strategies/
-  examples.py    reference strategies (read-only for fellows)
-  my_strategy.py the template fellows edit
+  event_examples.py  mean reversion, breakout momentum, dip buy with stop
+  examples.py        column-at-a-time reference strategies (incl. the cheater)
+  my_strategy.py     the template fellows edit (EventStrategy)
 data/            CSVs; any file dropped here appears in the dropdown
-app.py           Streamlit UI (5 tabs: Performance / Risk / Costs / Year / Data)
+app.py           Streamlit UI (6 tabs: Performance / Risk / Costs / Year /
+                 Trade log / Data)
 compete.py       batch runner + static HTML leaderboard
 submissions/     mock submissions for testing compete.py
+tests/           pytest suite: regression table, invariants, event API,
+                 loader, trade log, headless app smoke test
+docs/            PLAN.md (roadmap), EVENT_STRATEGIES.md (design report)
 ```
+
+Both strategy styles reach the engine the same way: the engine only ever
+sees a position series. `run()` = `generate_positions()` + `run_positions()`.
+The app caches positions per (strategy source, parameters, dataset, period),
+so moving the fee slider does not re-run a bar-by-bar strategy.
 
 Strategies are discovered by reflection: `app.py` imports every non-underscore
 `.py` in `strategies/` and finds `Strategy` subclasses. Any `__init__`
@@ -151,8 +185,15 @@ assert a["max_drawdown"] == b["max_drawdown"]      # not annualized
 assert a["sharpe"] != b["sharpe"]                  # is annualized
 ```
 
-There is no test suite yet — adding `pytest` tests around the invariants above
-would be a genuinely useful contribution.
+All of the above is automated:
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest            # from backtester/; about 20 seconds
+```
+
+Run it before every commit. It passes on Python 3.9 (pandas 2.3) and 3.11
+(pandas 3.0).
 
 ## Decisions already made (do not re-litigate without asking)
 
@@ -178,6 +219,12 @@ would be a genuinely useful contribution.
   left in for testing. Remove before distributing to fellows.
 - Only one dataset ships. A held-out dataset for demo day still needs to be
   chosen and kept out of the fellows' copy.
+- EventStrategy fills at the bar's close. A stop-loss is checked at the
+  close too, so a gap can exit well past the stop (the dip-buy example has a
+  -15% exit on a -5% stop). Intrabar stops would need high/low fill logic.
+- EventStrategy costs ~70 µs per bar of loop overhead plus whatever on_bar
+  does; ~2 s per run for a year of hourly bars. Fine for daily data and the
+  app caches positions, but minute data over years would be slow.
 - Fee model uses one rate for both sides. Real exchanges charge different
   maker and taker fees; entering/exiting at the close means crossing the
   spread, so taker is arguably the honest rate.

@@ -14,38 +14,84 @@ Then open http://localhost:8501.
 
 ## Writing a strategy
 
-Open `strategies/my_strategy.py` and fill in one method:
+Open `strategies/my_strategy.py`. Your code is called once per bar (once a
+day on daily data), sees only the past, and decides whether to open or close
+a position:
+
+```python
+from bsequant import EventStrategy
+
+class MyStrategy(EventStrategy):
+    name = "Buy the dip"
+    description = "Buy 5% below the 20-day average, sell back at the average."
+
+    def on_bar(self, bar, history):
+        average = history["close"].tail(20).mean()
+
+        if self.position == 0 and bar["close"] < average * 0.95:
+            self.go_long()                 # open a long position
+        elif self.position > 0 and bar["close"] >= average:
+            self.go_flat()                 # close it
+```
+
+Save the file, hit **Reload strategy files** in the sidebar, and it appears in
+the dropdown. Any `__init__` argument with a default becomes a slider.
+
+| You can call | It means |
+|---|---|
+| `self.go_long(size=1.0)` | hold `+size` of your equity from the next bar |
+| `self.go_short(size=1.0)` | hold `-size` from the next bar |
+| `self.go_flat()` | close your position from the next bar |
+| `self.set_position(x)` | hold exactly `x` from the next bar |
+
+| You can read | It is |
+|---|---|
+| `bar["close"]`, `bar["high"]`, ... | the bar that just closed; `bar.name` is its date |
+| `history` | every bar up to and including this one |
+| `self.position` | your current position (`1.0`, `0.0`, `-1.0`, `0.5`, ...) |
+| `self.entry_price`, `self.entry_time` | where and when you opened the current trade |
+| `self.bars_held` | how many bars you have been in the trade |
+
+Any kind of strategy fits this shape: mean reversion, momentum, breakouts,
+stop-losses, time limits. `strategies/event_examples.py` has one of each.
+
+**Position convention:** `1.0` fully long, `0.0` flat, `-1.0` fully short.
+Fractions are allowed.
+
+### Timing: how precise can my trades be?
+
+Exactly as precise as the data. You decide at the **close** of a bar and your
+position starts earning from the **next** bar. On daily data that means once
+a day; on hourly data, once an hour. To trade more often, use more granular
+data (see [Adding data](#adding-data)).
+
+Because `on_bar` only ever sees bars that have already closed, you cannot
+accidentally use the future. If your Sharpe is above 3 anyway, you have a bug,
+not an edge.
+
+### The other way: a whole column at once
+
+`strategies/examples.py` shows the original style: subclass `Strategy` and
+return every position at once with pandas. It is faster on very large
+datasets, but you must end every signal with `.shift(1)` yourself:
 
 ```python
 from bsequant import Strategy
 import numpy as np
 
-class MyStrategy(Strategy):
-    name = "My strategy"
-    description = "Fade yesterday's move."
+class FadeYesterday(Strategy):
+    name = "Fade yesterday"
 
     def generate_positions(self, data):
         signal = -np.sign(data["log_return"])
         return signal.shift(1)          # <- the important part
 ```
 
-Save the file, hit **Reload strategy files** in the sidebar, and it appears in
-the dropdown. Any `__init__` argument with a default becomes a slider.
-
-**Position convention:** `1.0` fully long, `0.0` flat, `-1.0` fully short.
-Fractions are allowed.
-
-### The one rule
-
-Every signal must end in `.shift(1)`.
-
-Your position for day *t* may only use data from day *t-1* or earlier. Without
-the shift you are using today's return to decide today's trade, which is
-impossible in real life and will make your results look spectacular.
-
-The engine checks for this and warns you. If your Sharpe is above 3, you have
-a bug, not an edge. Run the `[BROKEN] Lookahead cheater` example to see what
-cheating looks like.
+Without the shift you are using today's return to decide today's trade,
+which is impossible in real life and makes results look spectacular. The
+engine checks for this and warns you; run the `[BROKEN] Lookahead cheater`
+example to see what that looks like. Both styles produce identical results
+for the same idea.
 
 ---
 
@@ -57,7 +103,8 @@ cheating looks like.
 | **Risk** | How bad did it get? Would you have held through it? |
 | **Costs** | At what fee level does the edge disappear? |
 | **Year by year** | Did it work every year, or just one lucky stretch? |
-| **Data** | The per-day numbers, downloadable as CSV. |
+| **Trade log** | Every trade: when it opened and closed, at what price, and what it made. Check your strategy trades where you meant it to. |
+| **Data** | The per-bar numbers, downloadable as CSV. |
 
 ### Reading the results honestly
 
@@ -77,12 +124,14 @@ cheating looks like.
 ```
 CLAUDE.md          context for AI assistants working on this repo
 bsequant/          the engine - you do not need to edit this
-  strategy.py      the Strategy base class
-  data.py          loading and train/test split
-  engine.py        backtest, metrics, lookahead detection
+  strategy.py      EventStrategy and Strategy, the two ways to write one
+  data.py          loading any CSV, train/test split
+  engine.py        backtest, metrics, trade log, lookahead detection
 strategies/
-  examples.py      read these first
-  my_strategy.py   your work goes here
+  event_examples.py  mean reversion, momentum, stop-loss - read these first
+  examples.py        column-at-a-time examples, incl. a deliberate cheater
+  my_strategy.py     your work goes here
+tests/             pytest suite (pip install pytest; python -m pytest)
 data/              CSV datasets
 app.py             the web UI
 compete.py         competition runner (instructor)
@@ -136,6 +185,24 @@ are still measuring returns every day.
 
 ## Adding data
 
-Drop a CSV in `data/` with columns `t, o, c, h, l` (date, open, close, high,
-low). It appears in the dataset dropdown automatically, and its frequency is
-detected on load.
+Drop a CSV in `data/` and it appears in the dataset dropdown. Name it
+`SYMBOL-INTERVAL.csv` (`SPY-1d.csv`, `BTC-1h.csv`). Daily, hourly or any other
+frequency works, and the frequency is detected on load.
+
+The file needs a date column and a close column. Common exports (crypto
+exchanges, Yahoo Finance) work as-is; these column names are recognized,
+ignoring upper/lower case:
+
+| Needed | Recognized names |
+|---|---|
+| date | `date`, `datetime`, `timestamp`, `time`, `t`, `open_time` (text dates or Unix timestamps) |
+| close | `Adj Close` (preferred for stocks), `close`, `c` |
+| open / high / low | `open`/`o`, `high`/`h`, `low`/`l` (optional) |
+| volume | `volume`, `vol`, `v` (optional) |
+
+Missing optional columns become empty (NaN). Times with a time zone are
+converted to UTC.
+
+**Stocks: use adjusted prices.** An unadjusted close shows a 4-for-1 stock
+split as a 75% crash in one day. When a file has both `Close` and
+`Adj Close`, the adjusted one is used.
