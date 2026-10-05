@@ -1,0 +1,3 @@
+# Everything in requirements.txt, plus what the test suite needs.
+-r requirements.txt
+pytest>=7
